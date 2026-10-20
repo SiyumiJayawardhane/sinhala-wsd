@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: sinhala-wsd-annotator
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        value: wsd_annotator
+      - key: SESSION_SECRET
+        generateValue: true
