@@ -47,10 +47,10 @@ MongoDB Atlas -- senses, sentences, annotators, labels
     generates `<word>_1`, `<word>_2`, ... per word on seed.
   - A repeated sense id is disambiguated on seed (`id#2`, `id#3`, ...) and
     logged, since labels are keyed on sense id and must be unique.
-- `app/data/sense_data.json` - the original 50-word, 265-sense inventory
-  in JSON. Used as a fallback only when `sense_data.csv` is absent.
+- `app/data/sense_data.json` - an older sense inventory in JSON (legacy
+  fallback). Used only when `sense_data.csv` is absent.
 - `app/data/sentences/<source>.txt` - bundled candidate sentences, one
-  file per extraction source (`culturax.txt`, `nsina.txt`, ...). The file
+  file per extraction source (e.g. `corpus15b_v4.txt`, `textbook.txt`). The file
   stem becomes the `source` label on each sentence. Block format:
   `s_word:` line + `sentences:` line (semicolon-separated), blocks
   separated by a blank line. See `app/data/sentences/README.md`.
@@ -213,13 +213,12 @@ UI -- there is no upload box. Add or refresh a source by committing a
   `GET /api/agreement-summary` returns the same numbers (cached ~30s).
 - Sentence seeding reads each bundled `.txt` fully into memory and does
   one `insert_many` per source -- fine for files in the tens of MB
-  (matches NSINA/CulturaX extraction output sizes), not designed for
+  (matches the extraction output sizes), not designed for
   arbitrarily large files.
 
 ## Next steps after annotation
 
 Use the `/api/export` endpoint (or the Export button) to pull all raw
 annotation + resolution data as JSON. From there, build your full N-way
-context-gloss training pairs the same way `data_collection_pipeline.ipynb`
-does for Binuka's original dataset, but keyed off the `resolved_sense`
+context-gloss training pairs, keyed off the `resolved_sense`
 field as your gold label per sentence.
