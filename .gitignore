@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# seed data: kept privately (Drive), loaded into MongoDB
+app/data/sense_data.csv
+app/data/sense_data.json
+app/data/candidate_sentences.txt
+app/data/sentences/*.txt
