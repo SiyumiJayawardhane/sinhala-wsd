@@ -1,8 +1,8 @@
 """Load candidate sentences into MongoDB from the bundled files
-(app/data/candidate_sentences.txt and app/data/sentences/*.txt).
+(app/data/candidate_sentences.txt and app/data/sentences/*.csv / *.txt).
 
 The app only seeds sentences when the collection is empty, so this is
-how you load a source you added later (e.g. a new nsina.txt).
+how you load a source you added later (e.g. a new nsina.csv).
 
 Usage (from the project root, with .env present):
 
@@ -37,7 +37,7 @@ async def main() -> int:
 
     files = load_seed_sentence_files()
     if not files:
-        print("No sentence files found. Add app/data/sentences/<source>.txt first.")
+        print("No sentence files found. Add app/data/sentences/<source>.csv first.")
         return 1
 
     total_words = {w for _, parsed in files for w in parsed}

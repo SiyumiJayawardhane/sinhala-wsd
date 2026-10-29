@@ -9,3 +9,5 @@ app/data/sense_data.csv
 app/data/sense_data.json
 app/data/candidate_sentences.txt
 app/data/sentences/*.txt
+app/data/sentences/corpus15b_v4_200_per_word.csv
+app/data/sentences/sinhala_lit_g10_11_target_word_sentences.csv

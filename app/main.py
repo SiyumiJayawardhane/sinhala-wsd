@@ -94,6 +94,12 @@ def sentence_id(word: str, text: str) -> str:
     return hashlib.sha256((word + "||" + text).encode("utf-8")).hexdigest()[:16]
 
 
+def _target_pos(doc: dict) -> dict:
+    """The target word's position in a sentence doc, for API responses
+    (None for sentences seeded without one)."""
+    return {"target_start": doc.get("target_start"), "target_end": doc.get("target_end")}
+
+
 def _norm_header(name: str) -> str:
     return (name or "").strip().lstrip("﻿").lower().replace(" ", "").replace("_", "")
 
@@ -272,10 +278,13 @@ def load_seed_sentence_files():
 
     Looked for, in order:
       * ``data/candidate_sentences.txt``  -> source ``"bundled_seed"``
-      * ``data/sentences/*.txt``          -> source = file stem
-        (e.g. ``data/sentences/culturax.txt`` -> source ``"culturax"``)
+      * ``data/sentences/*.csv``          -> source = file stem
+      * ``data/sentences/*.txt``          -> source = file stem, skipped
+        when a ``.csv`` with the same stem exists
 
-    Each file uses the extraction block format::
+    CSV files (preferred) have one row per sentence with the target word's
+    position - see :func:`_read_sentence_csv`. ``.txt`` files use the older
+    extraction block format, with no position::
 
         s_word: <word>
         sentences: <s1>; <s2>; <s3>
@@ -283,7 +292,7 @@ def load_seed_sentence_files():
         s_word: <next word>
         sentences: ...
 
-    Adding a new source is just dropping another ``.txt`` in
+    Adding a new source is just dropping another file in
     ``data/sentences/`` and reseeding.
     """
     out = []
@@ -292,9 +301,82 @@ def load_seed_sentence_files():
         out.append(("bundled_seed", _read_sentence_blocks(legacy)))
     folder = BASE_DIR / "data" / "sentences"
     if folder.is_dir():
+        csv_paths = sorted(folder.glob("*.csv"))
+        csv_stems = {p.stem for p in csv_paths}
+        for path in csv_paths:
+            out.append((path.stem, _read_sentence_csv(path)))
         for path in sorted(folder.glob("*.txt")):
-            out.append((path.stem, _read_sentence_blocks(path)))
+            if path.stem not in csv_stems:
+                out.append((path.stem, _read_sentence_blocks(path)))
     return out
+
+
+def _read_sentence_csv(path: Path):
+    """Parse a sentence CSV into ``{word: [entry, ...]}``.
+
+    Required columns: the word (``word`` / ``target_word`` / ...) and the
+    sentence (``sentence`` / ``text``). Optional: ``target_start`` and
+    ``target_end`` - 0-based code-point offsets of the target occurrence,
+    end exclusive (Python slicing) - and ``matched``, the exact surface form
+    at that position, used to validate the offsets. A row whose offsets are
+    missing or don't line up with ``matched`` keeps its sentence but loses
+    its position. Every other non-empty column (doc_id, book_page, ...) is
+    kept under ``meta`` for traceability; the ``No`` row counter is dropped.
+    """
+    word_keys = {"word", "targetword", "headword", "lemma"}
+    text_keys = {"sentence", "text"}
+
+    result = {}
+    bad_offsets = 0
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        first_line = f.readline()
+        f.seek(0)
+        delimiter = "\t" if first_line.count("\t") > first_line.count(",") else ","
+        reader = csv.DictReader(f, delimiter=delimiter)
+        if not reader.fieldnames:
+            return {}
+        colmap = {_norm_header(h): h for h in reader.fieldnames}
+        word_col = next((colmap[k] for k in word_keys if k in colmap), None)
+        text_col = next((colmap[k] for k in text_keys if k in colmap), None)
+        if word_col is None or text_col is None:
+            raise ValueError(
+                f"{path.name} needs a word column and a sentence column; "
+                f"found headers {reader.fieldnames}"
+            )
+        start_col = colmap.get("targetstart")
+        end_col = colmap.get("targetend")
+        matched_col = colmap.get("matched")
+        skip_cols = {word_col, text_col, start_col, end_col, colmap.get("no")}
+
+        for row in reader:
+            word = (row.get(word_col) or "").strip()
+            raw = row.get(text_col) or ""
+            text = raw.strip()
+            if not word or not text:
+                continue
+            entry = {"text": text}
+            try:
+                # offsets refer to the raw cell - shift by any stripped lead
+                lead = len(raw) - len(raw.lstrip())
+                start = int(row.get(start_col) or "") - lead
+                end = int(row.get(end_col) or "") - lead
+            except ValueError:
+                start = end = None
+            if start is not None:
+                matched = (row.get(matched_col) or "") if matched_col else None
+                if 0 <= start < end <= len(text) and (matched is None or text[start:end] == matched):
+                    entry["target_start"], entry["target_end"] = start, end
+                else:
+                    bad_offsets += 1
+            meta = {k: v for k, v in row.items() if k not in skip_cols and k and v}
+            if meta:
+                entry["meta"] = meta
+            result.setdefault(word, []).append(entry)
+
+    if bad_offsets:
+        print(f"[seed] {path.name}: {bad_offsets} rows had target offsets that "
+              f"don't match the sentence - loaded without a position")
+    return result
 
 
 def _read_sentence_blocks(path: Path):
@@ -323,15 +405,19 @@ def parse_candidate_blocks(text: str):
 
 
 async def bulk_import_sentences(parsed: dict, source: str) -> dict:
+    """Insert ``{word: [sentence, ...]}``, where each sentence is a plain
+    string (``.txt`` sources) or an entry dict from :func:`_read_sentence_csv`."""
     docs = []
     seen_ids = set()
     for word, sentences in parsed.items():
-        for text in dict.fromkeys(sentences):  # de-dupe within this word/file
-            sid = sentence_id(word, text)
-            if sid in seen_ids:
+        for entry in sentences:
+            if isinstance(entry, str):
+                entry = {"text": entry}
+            sid = sentence_id(word, entry["text"])
+            if sid in seen_ids:  # de-dupe within this word/file
                 continue
             seen_ids.add(sid)
-            docs.append({"_id": sid, "word": word, "text": text, "source": source})
+            docs.append({"_id": sid, "word": word, "source": source, **entry})
 
     inserted = 0
     if docs:
@@ -381,7 +467,7 @@ async def next_task(word: str, current: dict = Depends(get_current_annotator)):
     chosen = unlabeled_overlap[0] if unlabeled_overlap else (unlabeled_extra[0] if unlabeled_extra else None)
 
     return {
-        "sentence": {"sentence_id": chosen["_id"], "text": chosen["text"]} if chosen else None,
+        "sentence": {"sentence_id": chosen["_id"], "text": chosen["text"], **_target_pos(chosen)} if chosen else None,
         "is_overlap": chosen in overlap if chosen else False,
         "overlap_remaining": len(unlabeled_overlap),
         "extra_remaining": len(unlabeled_extra),
@@ -444,6 +530,7 @@ async def list_sentences(word: str, current: dict = Depends(get_current_annotato
             rows.append({
                 "sentence_id": sid,
                 "text": d["text"],
+                **_target_pos(d),
                 "is_overlap": (sid in overlap_ids) if _ASSIGNMENT_READY else (i < OVERLAP_SIZE),
                 "my_label": my_labels.get(sid),
                 "label_count": label_counts.get(sid, 0),
@@ -462,6 +549,7 @@ async def list_sentences(word: str, current: dict = Depends(get_current_annotato
         {
             "sentence_id": d["_id"],
             "text": d["text"],
+            **_target_pos(d),
             "is_overlap": (d["_id"] in overlap_ids) if _ASSIGNMENT_READY else (i < OVERLAP_SIZE),
             "my_label": my_labels.get(d["_id"]),
         }
@@ -503,7 +591,7 @@ async def delete_sentence(sentence_id: str, current: dict = Depends(require_admi
     """Remove one candidate sentence and any labels attached to it.
 
     The sentence _id is a global hash of (word, text), so it is enough on
-    its own. This only touches the database - the bundled seed .txt files
+    its own. This only touches the database - the bundled seed files
     are not modified, so a later `reseed_sentences --drop` would bring the
     sentence back unless it is also removed from the source file.
     """
@@ -665,6 +753,7 @@ async def agreement(word: str, current: dict = Depends(require_admin)):
         detail.append({
             "sentence_id": s["_id"],
             "text": s["text"],
+            **_target_pos(s),
             "votes": votes,
             "disagreement": len(set(votes.values())) > 1,
             "resolution": resolution_by_sentence[s["_id"]],
@@ -793,8 +882,17 @@ async def agreement_summary(current: dict = Depends(require_admin)):
 async def export_all(current: dict = Depends(require_admin)):
     cursor = labels_collection.find({}, {"_id": 0})
     labels = [doc async for doc in cursor]
+    # Attach the sentence text, target position and source so the export
+    # is usable as WSD training data on its own.
+    ids = list({doc["sentence_id"] for doc in labels})
+    sent_cursor = sentences_collection.find(
+        {"_id": {"$in": ids}},
+        {"text": 1, "target_start": 1, "target_end": 1, "source": 1, "meta": 1},
+    )
+    sentences = {d.pop("_id"): d async for d in sent_cursor}
     for doc in labels:
         for k, v in list(doc.items()):
             if isinstance(v, datetime):
                 doc[k] = v.isoformat()
+        doc.update(sentences.get(doc["sentence_id"], {}))
     return JSONResponse(content=labels)

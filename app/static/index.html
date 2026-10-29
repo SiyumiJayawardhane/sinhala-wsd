@@ -38,6 +38,25 @@ function el(tag, cls, html) {
   return e;
 }
 
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Sentence text as safe HTML with the target occurrence wrapped in <mark>,
+// using target_start/target_end from the sentence CSV. Those offsets count
+// Unicode code points (Python slicing), so slice via Array.from - String
+// indices count UTF-16 units and drift after an emoji. Sentences without a
+// position are shown unhighlighted.
+function highlightTarget(s) {
+  const chars = Array.from(s.text);
+  const a = s.target_start, b = s.target_end;
+  if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || a >= b || b > chars.length)
+    return escapeHtml(s.text);
+  return escapeHtml(chars.slice(0, a).join("")) +
+    '<mark class="bg-yellow-200 font-semibold rounded px-0.5">' + escapeHtml(chars.slice(a, b).join("")) + "</mark>" +
+    escapeHtml(chars.slice(b).join(""));
+}
+
 async function api(path, opts) {
   opts = opts || {};
   const headers = Object.assign({}, opts.headers || {});
@@ -341,7 +360,7 @@ async function renderAnnotate() {
     if (current.is_overlap)
       panel.appendChild(el("p", "text-xs text-blue-600 mb-1", "Shared overlap sentence — labelled by every annotator"));
     panel.appendChild(el("p",
-      "text-base leading-relaxed bg-blue-50 border-l-4 border-blue-400 p-3 rounded mb-4", current.text));
+      "text-base leading-relaxed bg-blue-50 border-l-4 border-blue-400 p-3 rounded mb-4", highlightTarget(current)));
 
     if (isAdmin) {
       // Read-only oversight view: sense list for reference + who labelled what.
@@ -482,7 +501,7 @@ async function renderAnnotate() {
         s.my_label === "REJECT" ? "rejected" : s.my_label));
     }
     if (badges.children.length) item.appendChild(badges);
-    item.appendChild(el("p", "line-clamp-3", s.text));
+    item.appendChild(el("p", "line-clamp-3", highlightTarget(s)));
     item.onclick = () => { currentSentenceId = s.sentence_id; renderAnnotate(); };
 
     if (isAdmin) {
@@ -556,7 +575,7 @@ async function renderDashboard() {
 
     data.detail.forEach(d => {
       const row = el("div", "border-t py-2");
-      row.appendChild(el("p", "text-sm mb-1", d.text.slice(0, 100)));
+      row.appendChild(el("p", "text-sm mb-1 line-clamp-2", highlightTarget(d)));
       const votesText = Object.entries(d.votes).map(([a, s]) => a + ": " + s).join(" | ") || "No votes yet";
       row.appendChild(el("p", "text-xs " + (d.disagreement ? "text-red-600" : "text-gray-500"), votesText));
       if (d.disagreement && !d.resolution.resolved_sense) {
