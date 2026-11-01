@@ -261,7 +261,7 @@ async def get_words(current: dict = Depends(get_current_annotator)):
     return sorted(words)
 
 
-@app.get("/api/senses/{word}")
+@app.get("/api/senses/{word:path}")
 async def get_senses(word: str, current: dict = Depends(get_current_annotator)):
     cursor = senses_collection.find({"word": word}, {"_id": 0})
     senses = [doc async for doc in cursor]
@@ -474,7 +474,7 @@ async def next_task(word: str, current: dict = Depends(get_current_annotator)):
     }
 
 
-@app.get("/api/sentences/{word}")
+@app.get("/api/sentences/{word:path}")
 async def list_sentences(word: str, current: dict = Depends(get_current_annotator)):
     """Candidate sentences for a word.
 
@@ -557,7 +557,7 @@ async def list_sentences(word: str, current: dict = Depends(get_current_annotato
     ]
 
 
-@app.get("/api/sentence-votes/{word}/{sentence_id}")
+@app.get("/api/sentence-votes/{word:path}/{sentence_id}")
 async def sentence_votes(word: str, sentence_id: str, current: dict = Depends(require_admin)):
     """Every annotator's raw label for one sentence, plus any resolution.
     Used by the Admin candidate view."""
@@ -637,7 +637,7 @@ async def resolve(req: ResolveRequest, current: dict = Depends(require_admin)):
 
 # ---------- Progress ----------
 
-@app.get("/api/progress/{word}")
+@app.get("/api/progress/{word:path}")
 async def progress(word: str, current: dict = Depends(get_current_annotator)):
     """Two different views, by role:
 
@@ -741,7 +741,7 @@ async def _word_agreement(word: str, annotator_names: list):
     return overlap_sentences, votes_by_sentence, resolution_by_sentence, stats
 
 
-@app.get("/api/agreement/{word}")
+@app.get("/api/agreement/{word:path}")
 async def agreement(word: str, current: dict = Depends(require_admin)):
     annotator_names = await _labelling_annotator_names()
     overlap_sentences, votes_by_sentence, resolution_by_sentence, stats = \

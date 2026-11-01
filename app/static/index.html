@@ -38,6 +38,29 @@ function el(tag, cls, html) {
   return e;
 }
 
+// Annotator-facing name for a sense: the first gloss item. Sense ids embed
+// the POS tag and inventory source (දිය_නා.ප්‍ර._1, ..._custom_1), which
+// would bias annotators, so only Admin views show the raw id.
+function senseName(senseId, senses) {
+  if (senseId === "REJECT") return "not a valid usage";
+  const s = (senses || (dataCache && dataCache.senses) || []).find(x => x.senseId === senseId);
+  return s ? s.gloss.split(/\s*;\s*/)[0] : senseId;
+}
+
+// Admin-facing: the raw id (needed to read votes and the export) plus its
+// gloss, so a vote can be understood without the inventory open.
+function senseWithGloss(senseId, senses) {
+  if (senseId === "REJECT") return senseName(senseId);
+  return `${senseId} (${senseName(senseId, senses)})`;
+}
+
+// Display form of a word: spelling variants are stored as "ගත / ගත්",
+// "කල/කල්" or "නුබ, නුඹ"; show them all as "a / b". Display only - the
+// stored word (used in API calls and labels) is unchanged.
+function wordLabel(w) {
+  return w.split(/\s*[\/,]\s*/).join(" / ");
+}
+
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -84,27 +107,28 @@ function renderNav() {
   if (!me) return;
   nav.appendChild(el("button", "underline", "Annotate"));
   nav.lastChild.onclick = () => renderAnnotate();
-  nav.appendChild(el("span", "", "&nbsp;|&nbsp;"));
   if (me.role === "Admin") {
+    nav.appendChild(el("span", "", "&nbsp;|&nbsp;"));
     nav.appendChild(el("button", "underline", "Agreement"));
     nav.lastChild.onclick = () => renderDashboard();
     nav.appendChild(el("span", "", "&nbsp;|&nbsp;"));
     nav.appendChild(el("button", "underline", "Annotators"));
     nav.lastChild.onclick = () => renderRegisterAnnotator();
     nav.appendChild(el("span", "", "&nbsp;|&nbsp;"));
+    // /api/export is Admin-only server-side, so annotators don't get the button.
+    const exportBtn = el("button", "underline", "Export");
+    exportBtn.onclick = async () => {
+      let data;
+      try { data = await api("/api/export"); }
+      catch (e) { alert("Export failed: " + e.message); return; }
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = el("a"); a.href = url; a.download = "wsd_labels_export.json";
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    };
+    nav.appendChild(exportBtn);
   }
-  const exportBtn = el("button", "underline", "Export");
-  exportBtn.onclick = async () => {
-    let data;
-    try { data = await api("/api/export"); }
-    catch (e) { alert("Export failed: " + e.message); return; }
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = el("a"); a.href = url; a.download = "wsd_labels_export.json";
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-  };
-  nav.appendChild(exportBtn);
   nav.appendChild(el("span", "bg-blue-800 px-3 py-1 rounded ml-2", me.name + " (" + me.role + ")"));
   const logout = el("button", "underline ml-2", "Log out");
   logout.onclick = () => {
@@ -303,7 +327,7 @@ async function renderAnnotate() {
       "px-3 py-1.5 rounded-lg border text-sm transition-colors " +
       (w === currentWord
         ? "border-blue-500 bg-blue-600 text-white font-bold"
-        : "border-gray-300 bg-white hover:bg-gray-50"), w);
+        : "border-gray-300 bg-white hover:bg-gray-50"), escapeHtml(wordLabel(w)));
     b.onclick = () => { currentWord = w; currentSentenceId = null; renderAnnotate(); };
     wordGrid.appendChild(b);
   });
@@ -340,7 +364,7 @@ async function renderAnnotate() {
   // ----- Annotation panel (3/5 of the right area) -----
   const panel = el("div", "lg:w-3/5 bg-white rounded-xl shadow-md border p-5");
   panel.appendChild(el("p", "text-xs uppercase tracking-wide text-gray-500", "Target word"));
-  panel.appendChild(el("p", "text-3xl font-bold text-blue-700 mb-4", currentWord));
+  panel.appendChild(el("p", "text-3xl font-bold text-blue-700 mb-4", escapeHtml(wordLabel(currentWord))));
 
   if (!current) {
     panel.appendChild(el("p", "text-gray-500", "No candidate sentences for this word yet."));
@@ -384,10 +408,10 @@ async function renderAnnotate() {
             `Annotations (${entries.length})` + (v.disagreement ? " — disagreement" : "")));
           if (!entries.length) votesBox.appendChild(el("p", "text-gray-400", "Nobody has labelled this yet."));
           entries.forEach(([a, sense]) => votesBox.appendChild(
-            el("p", "", a + ": " + (sense === "REJECT" ? "not a valid usage" : sense))));
+            el("p", "", escapeHtml(a + ": " + senseWithGloss(sense)))));
           if (v.resolved_sense)
             votesBox.appendChild(el("p", "text-green-700 mt-1",
-              "Resolved: " + v.resolved_sense + " (by " + v.resolved_by + ")"));
+              escapeHtml("Resolved: " + senseWithGloss(v.resolved_sense) + " (by " + v.resolved_by + ")")));
         })
         .catch(() => { votesBox.innerText = "Could not load annotations."; });
     } else {
@@ -400,8 +424,7 @@ async function renderAnnotate() {
         radio.onchange = () => { chosen = s.senseId; };
         opt.appendChild(radio);
         const td = el("div");
-        td.appendChild(el("p", "text-sm font-mono", s.senseId));
-        td.appendChild(el("p", "text-sm text-gray-600", s.gloss));
+        td.appendChild(el("p", "text-sm text-gray-700", escapeHtml(s.gloss)));
         opt.appendChild(td);
         senseWrap.appendChild(opt);
       });
@@ -451,14 +474,14 @@ async function renderAnnotate() {
       `${progress.total_labelled} / ${progress.total_assigned} of your sentences labelled` +
       (progress.rejected ? ` (${progress.rejected} not a valid usage)` : "")));
     (progress.senses || []).forEach(p => {
-      prog.appendChild(el("p", "text-gray-600", `${p.senseId}: ${p.my_count}`));
+      prog.appendChild(el("p", "text-gray-600", `${escapeHtml(senseName(p.senseId))}: ${p.my_count}`));
     });
   } else {
     prog.appendChild(el("p", "font-bold text-gray-500 uppercase tracking-wide", "Progress (resolved labels)"));
     (progress.senses || []).forEach(p => {
       const c = p.confirmed_count < p.floor ? "text-red-600"
         : p.confirmed_count >= p.ceiling ? "text-green-600" : "text-gray-600";
-      prog.appendChild(el("p", c, `${p.senseId}: ${p.confirmed_count} / ${p.floor}-${p.ceiling}`));
+      prog.appendChild(el("p", c, escapeHtml(`${senseWithGloss(p.senseId)}: ${p.confirmed_count} / ${p.floor}-${p.ceiling}`)));
     });
   }
   panel.appendChild(prog);
@@ -498,7 +521,7 @@ async function renderAnnotate() {
           s.assigned_to));
     } else if (s.my_label) {
       badges.appendChild(el("span", "text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded",
-        s.my_label === "REJECT" ? "rejected" : s.my_label));
+        s.my_label === "REJECT" ? "rejected" : escapeHtml(senseName(s.my_label))));
     }
     if (badges.children.length) item.appendChild(badges);
     item.appendChild(el("p", "line-clamp-3", highlightTarget(s)));
@@ -552,14 +575,21 @@ async function renderDashboard() {
   wrap.appendChild(summaryCard);
 
   const select = el("select", "border rounded px-3 py-2 mb-4");
-  words.forEach(w => select.appendChild(el("option", "", w)));
+  words.forEach(w => {
+    const opt = el("option", "", escapeHtml(wordLabel(w)));
+    opt.value = w;
+    select.appendChild(opt);
+  });
   wrap.appendChild(select);
   const content = el("div");
   wrap.appendChild(content);
 
   async function load(word) {
     content.innerHTML = "Loading...";
-    const data = await api("/api/agreement/" + encodeURIComponent(word));
+    const [data, senses] = await Promise.all([
+      api("/api/agreement/" + encodeURIComponent(word)),
+      api("/api/senses/" + encodeURIComponent(word)),
+    ]);
     content.innerHTML = "";
     const kappaBox = el("div", "bg-gray-100 rounded-lg p-4 mb-4");
     kappaBox.appendChild(el("p", "text-xs text-gray-500",
@@ -576,12 +606,16 @@ async function renderDashboard() {
     data.detail.forEach(d => {
       const row = el("div", "border-t py-2");
       row.appendChild(el("p", "text-sm mb-1 line-clamp-2", highlightTarget(d)));
-      const votesText = Object.entries(d.votes).map(([a, s]) => a + ": " + s).join(" | ") || "No votes yet";
-      row.appendChild(el("p", "text-xs " + (d.disagreement ? "text-red-600" : "text-gray-500"), votesText));
+      const votesText = Object.entries(d.votes).map(([a, s]) => a + ": " + senseWithGloss(s, senses)).join(" | ") || "No votes yet";
+      row.appendChild(el("p", "text-xs " + (d.disagreement ? "text-red-600" : "text-gray-500"), escapeHtml(votesText)));
       if (d.disagreement && !d.resolution.resolved_sense) {
         const resSelect = el("select", "text-sm border rounded mr-2");
-        data.detail; // categories not directly available here; reuse votes values + senses fetch omitted for brevity
-        Object.values(d.votes).filter((v, i, a) => a.indexOf(v) === i).forEach(v => resSelect.appendChild(el("option", "", v)));
+        // Final label is one of the senses the annotators actually chose.
+        Object.values(d.votes).filter((v, i, a) => a.indexOf(v) === i).forEach(v => {
+          const opt = el("option", "", escapeHtml(senseWithGloss(v, senses)));
+          opt.value = v;
+          resSelect.appendChild(opt);
+        });
         const resBtn = el("button", "text-sm bg-gray-700 text-white px-2 py-1 rounded", "Set final label");
         resBtn.onclick = async () => {
           await api("/api/resolve", {
@@ -593,7 +627,8 @@ async function renderDashboard() {
         row.appendChild(resSelect);
         row.appendChild(resBtn);
       } else if (d.resolution.resolved_sense) {
-        row.appendChild(el("p", "text-xs text-green-600", `Resolved: ${d.resolution.resolved_sense} (by ${d.resolution.resolved_by})`));
+        row.appendChild(el("p", "text-xs text-green-600",
+          escapeHtml(`Resolved: ${senseWithGloss(d.resolution.resolved_sense, senses)} (by ${d.resolution.resolved_by})`)));
       }
       content.appendChild(row);
     });
@@ -628,7 +663,7 @@ async function renderDashboard() {
       const tr = el("tr", "border-t cursor-pointer hover:bg-gray-50" + (r.paradox ? " bg-amber-50" : ""));
       tr.onclick = () => { select.value = r.word; load(r.word); content.scrollIntoView({ behavior: "smooth" }); };
       tr.innerHTML =
-        `<td class='py-1 pr-2 font-bold'>${r.word}</td>` +
+        `<td class='py-1 pr-2 font-bold'>${escapeHtml(wordLabel(r.word))}</td>` +
         `<td class='pr-2'>${r.n_fully_rated}</td>` +
         `<td class='pr-2'>${kap(r.kappa)}</td>` +
         `<td class='pr-2'>${pct(r.observed_agreement)}</td>` +
