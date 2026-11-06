@@ -3,7 +3,7 @@
 A sense-annotated, multi-annotator Word Sense Disambiguation (WSD) dataset and evaluation pipeline for Sinhala
 (final-year Individual Research Project, IIT Sri Lanka / Robert Gordon University).
 
-- **Target words:** 65 candidate polysemous Sinhala words, base form only. After annotation, words with fewer than two attested senses are reported and removed.
+- **Target words:** 70 candidate polysemous Sinhala words, base form only. After annotation, words with fewer than two attested senses are reported and removed.
 - **Sense inventory:** glosses from an unpublished Sinhala sense structure shared by D. Sumanathilaka, checked against Sinhala resource books.
 - **Sentence sources:** the Sinhala-1.5B corpus (Ranasinghe et al., 2025) and a Grade 10–11 Sinhala literature textbook (Educational Publications Department).
 - **Sampling:** sentences are drawn at random, so each sense keeps its natural frequency in real text.
