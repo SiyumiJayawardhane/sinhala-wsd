@@ -56,6 +56,11 @@ BASE_DIR = Path(__file__).resolve().parent
 OVERLAP_SIZE = 5        # fallback only, used until scripts/assign_sentences.py has run
 SENSE_FLOOR = 10
 SENSE_CEILING = 25
+# Labels an annotator (or the resolver) can choose besides a listed sense.
+# They are extra Fleiss categories, so every vote counts in the matrix.
+SENSE_NOT_LISTED = "SENSE_NOT_LISTED"     # valid usage, but no listed sense fits
+NOT_A_VALID_USAGE = "NOT_A_VALID_USAGE"   # not a valid usage of the word
+EXTRA_LABELS = [SENSE_NOT_LISTED, NOT_A_VALID_USAGE]
 
 # Loaded from the `assignments` collection at startup (see load_assignment).
 #   _OVERLAP_BY_WORD[word]            -> set of sentence_ids everyone labels
@@ -686,7 +691,8 @@ async def progress(word: str, current: dict = Depends(get_current_annotator)):
         "mode": "individual",
         "total_assigned": total_assigned,
         "total_labelled": total_labelled,
-        "rejected": tally.get("REJECT", 0),
+        "not_valid": tally.get(NOT_A_VALID_USAGE, 0),
+        "not_listed": tally.get(SENSE_NOT_LISTED, 0),
         "senses": rows,
     }
 
@@ -717,7 +723,7 @@ async def _word_agreement(word: str, annotator_names: list):
     """Build the Fleiss matrix + stats for one word. Returns
     (overlap_sentences, votes_by_sentence, resolution_by_sentence, stats)."""
     senses = [doc async for doc in senses_collection.find({"word": word}, {"_id": 0})]
-    categories = [s["senseId"] for s in senses] + ["REJECT"]
+    categories = [s["senseId"] for s in senses] + EXTRA_LABELS
 
     overlap_sentences = await _word_overlap_sentences(word)
     overlap_ids = [s["_id"] for s in overlap_sentences]
@@ -831,7 +837,7 @@ async def agreement_summary(current: dict = Depends(require_admin)):
 
     rows = []
     for word in sorted(senses_by_word):
-        categories = senses_by_word[word] + ["REJECT"]
+        categories = senses_by_word[word] + EXTRA_LABELS
         ids = overlap_by_word.get(word, [])
         votes_by_sentence = {sid: votes.get((word, sid), {}) for sid in ids}
         matrix = build_agreement_matrix(votes_by_sentence, annotator_names, categories)

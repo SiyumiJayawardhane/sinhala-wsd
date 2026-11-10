@@ -4,7 +4,7 @@ from typing import List, Dict, Optional
 def fleiss_kappa(matrix: List[List[int]]) -> Optional[float]:
     """
     Standard Fleiss' Kappa.
-    matrix: one row per subject (sentence), one column per category (sense_id/REJECT).
+    matrix: one row per subject (sentence), one column per category (sense_id/SENSE_NOT_LISTED/NOT_A_VALID_USAGE).
     Each cell = number of raters who assigned that category to that subject.
     All rows must sum to the same n (number of raters per subject).
     """

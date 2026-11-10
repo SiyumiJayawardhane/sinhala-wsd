@@ -20,7 +20,7 @@ class SubmitLabelRequest(BaseModel):
     # never from client-supplied data.
     word: str
     sentence_id: str
-    chosen_sense: str  # a sense_id, or "REJECT"
+    chosen_sense: str  # a sense_id, "SENSE_NOT_LISTED" or "NOT_A_VALID_USAGE"
 
 
 class ResolveRequest(BaseModel):

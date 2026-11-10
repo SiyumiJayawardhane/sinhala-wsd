@@ -41,8 +41,16 @@ function el(tag, cls, html) {
 // Annotator-facing name for a sense: the first gloss item. Sense ids embed
 // the POS tag and inventory source (දිය_නා.ප්‍ර._1, ..._custom_1), which
 // would bias annotators, so only Admin views show the raw id.
+// The two labels offered besides the listed senses (ids match the backend).
+const EXTRA_LABELS = [
+  { id: "SENSE_NOT_LISTED", si: "ලැයිස්තුවේ නැති අර්ථයක්", en: "Sense not listed" },
+  { id: "NOT_A_VALID_USAGE", si: "වලංගු භාවිතයක් නොවේ", en: "Not a valid usage" },
+];
+const extraLabel = id => EXTRA_LABELS.find(x => x.id === id);
+
 function senseName(senseId, senses) {
-  if (senseId === "REJECT") return "not a valid usage";
+  const x = extraLabel(senseId);
+  if (x) return `${x.si} (${x.en})`;
   const s = (senses || (dataCache && dataCache.senses) || []).find(x => x.senseId === senseId);
   return s ? s.gloss.split(/\s*;\s*/)[0] : senseId;
 }
@@ -50,7 +58,7 @@ function senseName(senseId, senses) {
 // Admin-facing: the raw id (needed to read votes and the export) plus its
 // gloss, so a vote can be understood without the inventory open.
 function senseWithGloss(senseId, senses) {
-  if (senseId === "REJECT") return senseName(senseId);
+  if (extraLabel(senseId)) return senseName(senseId);
   return `${senseId} (${senseName(senseId, senses)})`;
 }
 
@@ -428,13 +436,20 @@ async function renderAnnotate() {
         opt.appendChild(td);
         senseWrap.appendChild(opt);
       });
-      const rej = el("label", "flex gap-3 items-center py-2 border-t cursor-pointer hover:bg-gray-50");
-      const rejR = el("input"); rejR.type = "radio"; rejR.name = "sense"; rejR.value = "REJECT";
-      if (chosen === "REJECT") rejR.checked = true;
-      rejR.onchange = () => { chosen = "REJECT"; };
-      rej.appendChild(rejR);
-      rej.appendChild(el("p", "text-sm text-gray-600", "Not a valid usage of this word"));
-      senseWrap.appendChild(rej);
+      // Not shuffled: always last, set apart from the senses.
+      EXTRA_LABELS.forEach((x, i) => {
+        const opt = el("label", "flex gap-3 items-center py-2 cursor-pointer hover:bg-gray-50 " +
+          (i === 0 ? "border-t-2 border-gray-300 mt-1" : "border-t"));
+        const radio = el("input"); radio.type = "radio"; radio.name = "sense"; radio.value = x.id;
+        if (chosen === x.id) radio.checked = true;
+        radio.onchange = () => { chosen = x.id; };
+        opt.appendChild(radio);
+        const td = el("div");
+        td.appendChild(el("p", "text-sm text-gray-700 italic", escapeHtml(x.si)));
+        td.appendChild(el("p", "text-xs text-gray-400", escapeHtml(x.en)));
+        opt.appendChild(td);
+        senseWrap.appendChild(opt);
+      });
       panel.appendChild(senseWrap);
 
       panel.appendChild(el("p", "text-xs text-gray-400 mt-3 h-4",
@@ -472,7 +487,9 @@ async function renderAnnotate() {
     prog.appendChild(el("p", "font-bold text-gray-500 uppercase tracking-wide", "Your progress"));
     prog.appendChild(el("p", "text-gray-700 mb-1",
       `${progress.total_labelled} / ${progress.total_assigned} of your sentences labelled` +
-      (progress.rejected ? ` (${progress.rejected} not a valid usage)` : "")));
+      [progress.not_listed ? `${progress.not_listed} sense not listed` : "",
+       progress.not_valid ? `${progress.not_valid} not a valid usage` : ""]
+        .filter(Boolean).map(t => ` (${t})`).join("")));
     (progress.senses || []).forEach(p => {
       prog.appendChild(el("p", "text-gray-600", `${escapeHtml(senseName(p.senseId))}: ${p.my_count}`));
     });
@@ -521,7 +538,8 @@ async function renderAnnotate() {
           s.assigned_to));
     } else if (s.my_label) {
       badges.appendChild(el("span", "text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded",
-        s.my_label === "REJECT" ? "rejected" : escapeHtml(senseName(s.my_label))));
+        s.my_label === "NOT_A_VALID_USAGE" ? "not valid" : s.my_label === "SENSE_NOT_LISTED" ? "not listed"
+          : escapeHtml(senseName(s.my_label))));
     }
     if (badges.children.length) item.appendChild(badges);
     item.appendChild(el("p", "line-clamp-3", highlightTarget(s)));
@@ -608,27 +626,67 @@ async function renderDashboard() {
       row.appendChild(el("p", "text-sm mb-1 line-clamp-2", highlightTarget(d)));
       const votesText = Object.entries(d.votes).map(([a, s]) => a + ": " + senseWithGloss(s, senses)).join(" | ") || "No votes yet";
       row.appendChild(el("p", "text-xs " + (d.disagreement ? "text-red-600" : "text-gray-500"), escapeHtml(votesText)));
-      if (d.disagreement && !d.resolution.resolved_sense) {
-        const resSelect = el("select", "text-sm border rounded mr-2");
-        // Final label is one of the senses the annotators actually chose.
-        Object.values(d.votes).filter((v, i, a) => a.indexOf(v) === i).forEach(v => {
-          const opt = el("option", "", escapeHtml(senseWithGloss(v, senses)));
+      // Resolve controls: shown for an unresolved disagreement, or after
+      // "Change" on an already resolved one (the new choice overwrites it).
+      const showResolve = (current) => {
+        const box = el("div", "flex flex-wrap items-center gap-2 mt-1");
+        const resSelect = el("select", "text-sm border rounded mr-2 max-w-full");
+        // The panel may pick any sense, not only one an annotator chose:
+        // voted senses first (most votes first, so the majority is
+        // preselected), then the rest of the inventory and the two extra labels.
+        const counts = {};
+        Object.values(d.votes).forEach(v => { counts[v] = (counts[v] || 0) + 1; });
+        const voted = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+        const addOpt = (parent, v, text) => {
+          const opt = el("option", "", escapeHtml(text));
           opt.value = v;
-          resSelect.appendChild(opt);
-        });
-        const resBtn = el("button", "text-sm bg-gray-700 text-white px-2 py-1 rounded", "Set final label");
+          parent.appendChild(opt);
+        };
+        const votedGroup = document.createElement("optgroup");
+        votedGroup.label = "Chosen by annotators";
+        voted.forEach(v => addOpt(votedGroup, v,
+          `${senseWithGloss(v, senses)} — ${counts[v]} vote${counts[v] > 1 ? "s" : ""}`));
+        resSelect.appendChild(votedGroup);
+        const others = senses.map(s => s.senseId)
+          .concat(EXTRA_LABELS.map(x => x.id))
+          .filter(id => !counts[id]);
+        if (others.length) {
+          const otherGroup = document.createElement("optgroup");
+          otherGroup.label = "Other options";
+          others.forEach(v => addOpt(otherGroup, v, senseWithGloss(v, senses)));
+          resSelect.appendChild(otherGroup);
+        }
+        if (current) resSelect.value = current;
+        const resBtn = el("button", "text-sm bg-gray-700 text-white px-2 py-1 rounded",
+          current ? "Save change" : "Set final label");
         resBtn.onclick = async () => {
+          resBtn.disabled = true;
           await api("/api/resolve", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ word, sentence_id: d.sentence_id, final_sense: resSelect.value })
           });
           load(word);
         };
-        row.appendChild(resSelect);
-        row.appendChild(resBtn);
-      } else if (d.resolution.resolved_sense) {
-        row.appendChild(el("p", "text-xs text-green-600",
+        box.appendChild(resSelect);
+        box.appendChild(resBtn);
+        if (current) {
+          const cancel = el("button", "text-sm text-gray-500 underline", "Cancel");
+          cancel.onclick = () => load(word);
+          box.appendChild(cancel);
+        }
+        return box;
+      };
+
+      if (d.resolution.resolved_sense) {
+        const line = el("div", "flex flex-wrap items-center gap-2");
+        line.appendChild(el("p", "text-xs text-green-600",
           escapeHtml(`Resolved: ${senseWithGloss(d.resolution.resolved_sense, senses)} (by ${d.resolution.resolved_by})`)));
+        const change = el("button", "text-xs text-blue-600 underline", "Change");
+        change.onclick = () => line.replaceWith(showResolve(d.resolution.resolved_sense));
+        line.appendChild(change);
+        row.appendChild(line);
+      } else if (d.disagreement) {
+        row.appendChild(showResolve(null));
       }
       content.appendChild(row);
     });
