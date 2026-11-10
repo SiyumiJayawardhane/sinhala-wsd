@@ -114,8 +114,14 @@ function renderNav() {
   nav.innerHTML = "";
   if (!me) return;
   nav.appendChild(el("button", "underline", "Annotate"));
-  nav.lastChild.onclick = () => renderAnnotate();
+  nav.lastChild.onclick = () => {
+    if (me.role !== "Admin") wordsCache = null;   // pick up a new batch
+    renderAnnotate();
+  };
   if (me.role === "Admin") {
+    nav.appendChild(el("span", "", "&nbsp;|&nbsp;"));
+    nav.appendChild(el("button", "underline", "Batches"));
+    nav.lastChild.onclick = () => renderBatches();
     nav.appendChild(el("span", "", "&nbsp;|&nbsp;"));
     nav.appendChild(el("button", "underline", "Agreement"));
     nav.lastChild.onclick = () => renderDashboard();
@@ -131,7 +137,7 @@ function renderNav() {
       catch (e) { alert("Export failed: " + e.message); return; }
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
-      const a = el("a"); a.href = url; a.download = "wsd_labels_export.json";
+      const a = el("a"); a.href = url; a.download = `wsd_export_${new Date().toISOString().slice(0, 10)}.json`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
     };
@@ -302,11 +308,19 @@ async function renderAnnotate() {
       app.innerHTML = '<div class="text-gray-400 p-6">Loading…</div>';
     }
     if (!wordsCache) wordsCache = await api("/api/words");
-    const [se, st, pr] = await Promise.all([
-      api("/api/senses/" + encodeURIComponent(w)),
-      api("/api/sentences/" + encodeURIComponent(w)),
-      api("/api/progress/" + encodeURIComponent(w)),
-    ]);
+    let se, st, pr;
+    try {
+      [se, st, pr] = await Promise.all([
+        api("/api/senses/" + encodeURIComponent(w)),
+        api("/api/sentences/" + encodeURIComponent(w)),
+        api("/api/progress/" + encodeURIComponent(w)),
+      ]);
+    } catch (e) {
+      // e.g. the Admin closed this word's batch since the list was loaded
+      alert(e.message);
+      wordsCache = null; currentWord = null; currentSentenceId = null; dataCache = null;
+      return renderAnnotate();
+    }
     if (w !== currentWord) return;   // a newer word click superseded this load
     dataCache = { word: w, senses: se, sentences: st, progress: pr };
   } else if (!wordsCache) {
@@ -317,7 +331,7 @@ async function renderAnnotate() {
   const { senses, sentences, progress } =
     (dataCache && dataCache.word === currentWord)
       ? dataCache
-      : { senses: [], sentences: [], progress: { mode: "resolved", senses: [] } };
+      : { senses: [], sentences: [], progress: { mode: "admin", senses: [] } };
 
   // Data is ready - rebuild synchronously (instant, no visible blank).
   app.innerHTML = "";
@@ -330,6 +344,9 @@ async function renderAnnotate() {
   const sideInner = el("div", "bg-white rounded-xl shadow-md border p-3 md:sticky md:top-20 max-h-[82vh] overflow-y-auto");
   sideInner.appendChild(el("h3", "font-bold text-xs uppercase tracking-wide text-gray-500 mb-2 px-1", "Words"));
   const wordGrid = el("div", "flex flex-wrap gap-2");
+  if (!words.length)
+    sideInner.appendChild(el("p", "text-sm text-gray-500 px-1",
+      me.role === "Admin" ? "No words loaded." : "No words are open for annotation right now. Please check back later."));
   words.forEach(w => {
     const b = el("button",
       "px-3 py-1.5 rounded-lg border text-sm transition-colors " +
@@ -425,7 +442,8 @@ async function renderAnnotate() {
     } else {
       let chosen = current.my_label || null;
       const senseWrap = el("div");
-      senses.slice().sort(() => Math.random() - 0.5).forEach(s => {
+      // Same order for every sentence and annotator: the sense_data.csv order.
+      senses.forEach(s => {
         const opt = el("label", "flex gap-3 items-start py-2 border-t cursor-pointer hover:bg-gray-50");
         const radio = el("input"); radio.type = "radio"; radio.name = "sense"; radio.value = s.senseId;
         if (chosen === s.senseId) radio.checked = true;
@@ -494,11 +512,15 @@ async function renderAnnotate() {
       prog.appendChild(el("p", "text-gray-600", `${escapeHtml(senseName(p.senseId))}: ${p.my_count}`));
     });
   } else {
-    prog.appendChild(el("p", "font-bold text-gray-500 uppercase tracking-wide", "Progress (resolved labels)"));
+    prog.appendChild(el("p", "font-bold text-gray-500 uppercase tracking-wide", "Progress (all annotators)"));
+    prog.appendChild(el("p", "text-gray-700 mb-1",
+      `${progress.labelled_sentences || 0} / ${progress.total_sentences || 0} sentences have a label · ` +
+      `${progress.resolved_sentences || 0} resolved`));
     (progress.senses || []).forEach(p => {
-      const c = p.confirmed_count < p.floor ? "text-red-600"
-        : p.confirmed_count >= p.ceiling ? "text-green-600" : "text-gray-600";
-      prog.appendChild(el("p", c, escapeHtml(`${senseWithGloss(p.senseId)}: ${p.confirmed_count} / ${p.floor}-${p.ceiling}`)));
+      if (!p.label_count && !p.resolved_count && !p.gloss) return;   // unused extra labels
+      prog.appendChild(el("p", "text-gray-600",
+        escapeHtml(`${senseWithGloss(p.senseId)}: ${p.label_count} label${p.label_count === 1 ? "" : "s"}`) +
+        (p.resolved_count ? escapeHtml(` · ${p.resolved_count} resolved`) : "")));
     });
   }
   panel.appendChild(prog);
@@ -661,10 +683,16 @@ async function renderDashboard() {
           current ? "Save change" : "Set final label");
         resBtn.onclick = async () => {
           resBtn.disabled = true;
-          await api("/api/resolve", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ word, sentence_id: d.sentence_id, final_sense: resSelect.value })
-          });
+          try {
+            await api("/api/resolve", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ word, sentence_id: d.sentence_id, final_sense: resSelect.value })
+            });
+          } catch (e) {
+            resBtn.disabled = false;
+            alert("Could not save the final label: " + e.message);
+            return;
+          }
           load(word);
         };
         box.appendChild(resSelect);
@@ -709,6 +737,31 @@ async function renderDashboard() {
         `${s.n_paradox_words} word(s) show the kappa paradox — κ low but agreement high; report raw agreement`));
     summaryBody.appendChild(head);
 
+    // Snapshot of the per-word table as CSV (same numbers as on screen).
+    const dl = el("button", "text-xs bg-gray-700 text-white px-3 py-1 rounded mb-2", "Download CSV");
+    dl.onclick = () => {
+      const stamp = new Date().toISOString();
+      const num = (x, d) => (x === null || x === undefined) ? "" : x.toFixed(d);
+      const cell = v => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
+      const lines = [[
+        "word", "n_fully_rated", "n_overlap_total", "kappa", "observed_agreement",
+        "expected_agreement", "unanimity", "band", "kappa_paradox", "n_annotators", "exported_at"
+      ].join(",")];
+      s.rows.forEach(r => lines.push([
+        wordLabel(r.word), r.n_fully_rated, r.n_overlap_total, num(r.kappa, 4),
+        num(r.observed_agreement, 4), num(r.expected_agreement, 4), num(r.unanimity, 4),
+        r.kappa === null ? "" : r.band, r.paradox ? "yes" : "no", s.n_annotators, stamp
+      ].map(cell).join(",")));
+      // BOM so Excel opens the Sinhala text as UTF-8.
+      const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `agreement_per_word_${stamp.slice(0, 10)}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(a.href);
+    };
+    summaryBody.appendChild(dl);
+
     const bandsLine = Object.entries(s.bands || {}).map(([b, n]) => `${b}: ${n}`).join("  ·  ");
     if (bandsLine) summaryBody.appendChild(el("p", "text-xs text-gray-500 mb-2", "Bands — " + bandsLine));
 
@@ -737,6 +790,70 @@ async function renderDashboard() {
 
   select.onchange = () => load(select.value);
   if (words.length) load(words[0]);
+}
+
+// ---------- Batches (Admin): which words annotators can see ----------
+async function renderBatches() {
+  if (!me || me.role !== "Admin") return renderAnnotate();
+  const app = document.getElementById("app");
+  app.innerHTML = '<div class="text-gray-400 p-6">Loading…</div>';
+  if (!wordsCache) wordsCache = await api("/api/words");   // Admin: all words
+  const active = new Set(await api("/api/active-words"));
+  const words = wordsCache;
+
+  app.innerHTML = "";
+  const card = el("div", "max-w-4xl mx-auto bg-white border rounded-xl shadow-md p-4");
+  app.appendChild(card);
+  card.appendChild(el("p", "font-bold text-sm", "Active words (current batch)"));
+  card.appendChild(el("p", "text-xs text-gray-500 mb-3",
+    "Annotators see and can label only the ticked words. Same batch for everyone; " +
+    "nothing ticked means annotators see no words. Labels of unticked words are kept."));
+
+  const bar = el("div", "flex flex-wrap items-center gap-3 mb-3 text-sm");
+  const count = el("span", "text-gray-600");
+  const selAll = el("button", "underline text-blue-600", "Select all");
+  const clear = el("button", "underline text-blue-600", "Clear");
+  bar.appendChild(count); bar.appendChild(selAll); bar.appendChild(clear);
+  card.appendChild(bar);
+
+  const grid = el("div", "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-1 max-h-[60vh] overflow-y-auto border-t pt-2");
+  const boxes = [];
+  const update = () => {
+    const n = boxes.filter(b => b.checked).length;
+    count.innerText = `${n} of ${words.length} words active`;
+  };
+  words.forEach(w => {
+    const lab = el("label", "flex items-center gap-2 text-sm py-1 px-1 rounded hover:bg-gray-50 cursor-pointer");
+    const cb = el("input"); cb.type = "checkbox"; cb.value = w; cb.checked = active.has(w);
+    cb.onchange = update;
+    boxes.push(cb);
+    lab.appendChild(cb);
+    lab.appendChild(el("span", "", escapeHtml(wordLabel(w))));
+    grid.appendChild(lab);
+  });
+  card.appendChild(grid);
+  selAll.onclick = () => { boxes.forEach(b => { b.checked = true; }); update(); };
+  clear.onclick = () => { boxes.forEach(b => { b.checked = false; }); update(); };
+  update();
+
+  const foot = el("div", "flex items-center gap-3 mt-3");
+  const save = el("button", "bg-blue-600 text-white font-bold px-4 py-2 rounded-lg disabled:opacity-50", "Save");
+  const status = el("span", "text-sm text-gray-500");
+  foot.appendChild(save); foot.appendChild(status);
+  card.appendChild(foot);
+  save.onclick = async () => {
+    save.disabled = true; status.innerText = "Saving…";
+    try {
+      const r = await api("/api/active-words", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ words: boxes.filter(b => b.checked).map(b => b.value) })
+      });
+      status.innerText = `Saved — ${r.words.length} word(s) active. Annotators see the change when they reload.`;
+    } catch (e) {
+      status.innerText = "Could not save: " + e.message;
+    }
+    save.disabled = false;
+  };
 }
 
 function showFatal(msg) {

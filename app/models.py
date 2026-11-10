@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import List, Optional
 
 
 class LoginRequest(BaseModel):
@@ -21,6 +21,10 @@ class SubmitLabelRequest(BaseModel):
     word: str
     sentence_id: str
     chosen_sense: str  # a sense_id, "SENSE_NOT_LISTED" or "NOT_A_VALID_USAGE"
+
+
+class ActiveWordsRequest(BaseModel):
+    words: List[str]
 
 
 class ResolveRequest(BaseModel):

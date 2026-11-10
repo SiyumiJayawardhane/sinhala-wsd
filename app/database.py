@@ -19,6 +19,7 @@ sentences_collection = db["sentences"]
 annotators_collection = db["annotators"]
 labels_collection = db["labels"]
 assignments_collection = db["assignments"]  # one doc per word: overlap + per-annotator split
+settings_collection = db["settings"]  # app settings, e.g. {_id: "active_words", words: [...]}
 
 
 async def ensure_indexes():

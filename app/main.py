@@ -21,10 +21,13 @@ from .database import (
     annotators_collection,
     labels_collection,
     assignments_collection,
+    settings_collection,
     ensure_indexes,
     IS_MOCK_DB,
 )
-from .models import LoginRequest, CreateAnnotatorRequest, SubmitLabelRequest, ResolveRequest
+from .models import (
+    LoginRequest, CreateAnnotatorRequest, SubmitLabelRequest, ResolveRequest, ActiveWordsRequest,
+)
 from .agreement import build_agreement_matrix, agreement_stats
 from .auth import hash_password, verify_password, make_token, verify_token
 
@@ -53,9 +56,7 @@ async def require_admin(current: dict = Depends(get_current_annotator)):
 app = FastAPI(title="Sinhala WSD Multi-Annotator Tool")
 
 BASE_DIR = Path(__file__).resolve().parent
-OVERLAP_SIZE = 5        # fallback only, used until scripts/assign_sentences.py has run
-SENSE_FLOOR = 10
-SENSE_CEILING = 25
+OVERLAP_SIZE = 20       # fallback only, used until scripts/assign_sentences.py has run (same as its --overlap default)
 # Labels an annotator (or the resolver) can choose besides a listed sense.
 # They are extra Fleiss categories, so every vote counts in the matrix.
 SENSE_NOT_LISTED = "SENSE_NOT_LISTED"     # valid usage, but no listed sense fits
@@ -161,10 +162,19 @@ def _load_seed_senses_csv(csv_path: Path):
             )
 
         seen_ids = set()
+        last_word = ""
         for row in reader:
-            word = (row.get(word_col) or "").strip()
-            gloss = (row.get(gloss_col) or "").strip()
-            if not word or not gloss:
+            # Sheet layout: the word is written only on a word's first row;
+            # a blank word cell means "same word as the row above".
+            word = (row.get(word_col) or "").strip() or last_word
+            last_word = word
+            gloss = " ".join((row.get(gloss_col) or "").split())
+            if not word:
+                continue
+            if not gloss:
+                if any((v or "").strip() for v in row.values()):
+                    print(f"[seed] {word}: sense {(row.get(sense_col) or '').strip()!r} "
+                          f"has no gloss - skipped")
                 continue
             n = per_word_counter.get(word, 0) + 1
             per_word_counter[word] = n
@@ -260,15 +270,58 @@ async def get_annotators(current: dict = Depends(require_admin)):
 
 # ---------- Senses ----------
 
+# ---------- Active words (annotation batches) ----------
+# The Admin releases words in batches: annotators see and can label only
+# the words in the current batch. Same batch for everyone. Nothing active
+# means annotators see no words. The Admin always sees every word.
+
+async def _active_words() -> set:
+    doc = await settings_collection.find_one({"_id": "active_words"})
+    return set(doc.get("words", [])) if doc else set()
+
+
+async def _require_active(word: str, current: dict):
+    """Annotators may only read / label a word in the active batch."""
+    if current.get("role") == "Admin":
+        return
+    if word not in await _active_words():
+        raise HTTPException(status_code=403, detail="This word is not in the current batch")
+
+
 @app.get("/api/words")
 async def get_words(current: dict = Depends(get_current_annotator)):
     words = await senses_collection.distinct("word")
+    if current.get("role") != "Admin":
+        active = await _active_words()
+        words = [w for w in words if w in active]
     return sorted(words)
+
+
+@app.get("/api/active-words")
+async def get_active_words(current: dict = Depends(require_admin)):
+    return sorted(await _active_words())
+
+
+@app.post("/api/active-words")
+async def set_active_words(req: ActiveWordsRequest, current: dict = Depends(require_admin)):
+    known = set(await senses_collection.distinct("word"))
+    unknown = [w for w in req.words if w not in known]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown words: {', '.join(unknown)}")
+    words = sorted(set(req.words))
+    await settings_collection.update_one(
+        {"_id": "active_words"},
+        {"$set": {"words": words, "updated_by": current["name"], "updated_at": datetime.utcnow()}},
+        upsert=True,
+    )
+    return {"status": "saved", "words": words}
 
 
 @app.get("/api/senses/{word:path}")
 async def get_senses(word: str, current: dict = Depends(get_current_annotator)):
-    cursor = senses_collection.find({"word": word}, {"_id": 0})
+    await _require_active(word, current)
+    # Sorted by _id = insertion order = row order in sense_data.csv.
+    cursor = senses_collection.find({"word": word}, {"_id": 0}).sort("_id", 1)
     senses = [doc async for doc in cursor]
     if not senses:
         raise HTTPException(status_code=404, detail="Word not found")
@@ -448,6 +501,7 @@ async def bulk_import_sentences(parsed: dict, source: str) -> dict:
 
 @app.get("/api/next-task")
 async def next_task(word: str, current: dict = Depends(get_current_annotator)):
+    await _require_active(word, current)
     annotator = current["name"]
     all_sentences_cursor = sentences_collection.find({"word": word}).sort("_id", 1)
     all_sentences = [doc async for doc in all_sentences_cursor]
@@ -492,6 +546,7 @@ async def list_sentences(word: str, current: dict = Depends(get_current_annotato
     - Before `scripts/assign_sentences.py` has been run, everyone sees
       every sentence and the first `OVERLAP_SIZE` are marked as overlap.
     """
+    await _require_active(word, current)
     annotator = current["name"]
     role = current["role"]
 
@@ -613,6 +668,20 @@ async def delete_sentence(sentence_id: str, current: dict = Depends(require_admi
 
 @app.post("/api/submit-label")
 async def submit_label(req: SubmitLabelRequest, current: dict = Depends(get_current_annotator)):
+    await _require_active(req.word, current)
+    # Reject anything the current data would not offer - e.g. a page left
+    # open from before a reseed (old sense id) or before the split (a
+    # sentence now assigned to someone else). Nothing is saved; the
+    # annotator reloads and labels again.
+    stale = HTTPException(status_code=409, detail="This page is out of date - please reload the page.")
+    valid_senses = set(await senses_collection.distinct("senseId", {"word": req.word})) | set(EXTRA_LABELS)
+    if req.chosen_sense not in valid_senses:
+        raise stale
+    if not await sentences_collection.count_documents({"_id": req.sentence_id, "word": req.word}, limit=1):
+        raise stale
+    if _ASSIGNMENT_READY and current.get("role") != "Admin" \
+            and req.sentence_id not in _visible_ids(req.word, current["name"]):
+        raise stale
     await labels_collection.update_one(
         {"word": req.word, "sentence_id": req.sentence_id, "annotator": current["name"]},
         {"$set": {
@@ -627,6 +696,11 @@ async def submit_label(req: SubmitLabelRequest, current: dict = Depends(get_curr
 
 @app.post("/api/resolve")
 async def resolve(req: ResolveRequest, current: dict = Depends(require_admin)):
+    valid_senses = set(await senses_collection.distinct("senseId", {"word": req.word})) | set(EXTRA_LABELS)
+    if req.final_sense not in valid_senses or not await labels_collection.count_documents(
+        {"word": req.word, "sentence_id": req.sentence_id}, limit=1
+    ):
+        raise HTTPException(status_code=409, detail="This page is out of date - please reload the page.")
     await labels_collection.update_many(
         {"word": req.word, "sentence_id": req.sentence_id},
         {"$set": {
@@ -646,27 +720,46 @@ async def resolve(req: ResolveRequest, current: dict = Depends(require_admin)):
 async def progress(word: str, current: dict = Depends(get_current_annotator)):
     """Two different views, by role:
 
-    - Admin: unchanged - per sense, how many labels have been formally
-      *resolved* to it (dataset-wide sampling target, floor/ceiling).
+    - Admin: progress of the word across all annotators - how many
+      sentences have at least one label and how many are resolved, and
+      per sense (plus the two extra labels) how many labels chose it and
+      how many sentences were resolved to it. No targets: senses keep
+      their natural frequency.
     - Domain expert / Native speaker: their own labelling progress - how
       many of the sentences assigned to them they have personally
-      labelled, and how those labels break down by sense. There is no
-      floor/ceiling here; it is not a target, just a personal tally.
+      labelled, and how those labels break down by sense.
     """
     annotator = current["name"]
     role = current["role"]
-    senses = [doc async for doc in senses_collection.find({"word": word}, {"_id": 0})]
+    senses = [doc async for doc in senses_collection.find({"word": word}, {"_id": 0}).sort("_id", 1)]
 
     if role == "Admin":
-        rows = []
-        for s in senses:
-            confirmed = await labels_collection.count_documents({
-                "word": word,
-                "resolved_sense": s["senseId"],
-            })
-            rows.append({"senseId": s["senseId"], "gloss": s["gloss"], "confirmed_count": confirmed,
-                         "floor": SENSE_FLOOR, "ceiling": SENSE_CEILING})
-        return {"mode": "resolved", "senses": rows}
+        label_count, labelled, resolved_to = {}, set(), {}
+        async for lab in labels_collection.find(
+            {"word": word}, {"sentence_id": 1, "chosen_sense": 1, "resolved_sense": 1}
+        ):
+            cs = lab.get("chosen_sense")
+            label_count[cs] = label_count.get(cs, 0) + 1
+            labelled.add(lab["sentence_id"])
+            if lab.get("resolved_sense"):
+                # one entry per sentence, however many labels it has
+                resolved_to[lab["sentence_id"]] = lab["resolved_sense"]
+        resolved_count = {}
+        for rs in resolved_to.values():
+            resolved_count[rs] = resolved_count.get(rs, 0) + 1
+        ids = [s["senseId"] for s in senses] + EXTRA_LABELS
+        gloss = {s["senseId"]: s["gloss"] for s in senses}
+        return {
+            "mode": "admin",
+            "total_sentences": await sentences_collection.count_documents({"word": word}),
+            "labelled_sentences": len(labelled),
+            "resolved_sentences": len(resolved_to),
+            "senses": [
+                {"senseId": i, "gloss": gloss.get(i, ""), "label_count": label_count.get(i, 0),
+                 "resolved_count": resolved_count.get(i, 0)}
+                for i in ids
+            ],
+        }
 
     if _ASSIGNMENT_READY:
         total_assigned = len(_visible_ids(word, annotator))
@@ -722,7 +815,7 @@ async def _word_overlap_sentences(word: str) -> list:
 async def _word_agreement(word: str, annotator_names: list):
     """Build the Fleiss matrix + stats for one word. Returns
     (overlap_sentences, votes_by_sentence, resolution_by_sentence, stats)."""
-    senses = [doc async for doc in senses_collection.find({"word": word}, {"_id": 0})]
+    senses = [doc async for doc in senses_collection.find({"word": word}, {"_id": 0}).sort("_id", 1)]
     categories = [s["senseId"] for s in senses] + EXTRA_LABELS
 
     overlap_sentences = await _word_overlap_sentences(word)
@@ -886,10 +979,24 @@ async def agreement_summary(current: dict = Depends(require_admin)):
 
 @app.get("/api/export")
 async def export_all(current: dict = Depends(require_admin)):
-    cursor = labels_collection.find({}, {"_id": 0})
-    labels = [doc async for doc in cursor]
-    # Attach the sentence text, target position and source so the export
-    # is usable as WSD training data on its own.
+    """Everything needed to analyse the annotation offline, in one file:
+
+    - ``annotators``: name + role (no password hashes)
+    - ``senses``: the sense inventory (id, word, gloss)
+    - ``assignment``: overlap size / seed of the split, if one exists
+    - ``labels``: one row per (annotator, sentence), with the annotator's
+      ``role``, ``is_overlap`` (shared sentence used for kappa; null if no
+      split has been made yet), any resolution, and the sentence text,
+      target position, source and meta - usable as WSD data on its own.
+    """
+    annotators = [
+        {"name": a["name"], "role": a.get("role")}
+        async for a in annotators_collection.find({}, {"_id": 0, "name": 1, "role": 1})
+    ]
+    role_of = {a["name"]: a["role"] for a in annotators}
+    senses = [doc async for doc in senses_collection.find({}, {"_id": 0}).sort("_id", 1)]
+
+    labels = [doc async for doc in labels_collection.find({}, {"_id": 0})]
     ids = list({doc["sentence_id"] for doc in labels})
     sent_cursor = sentences_collection.find(
         {"_id": {"$in": ids}},
@@ -900,5 +1007,29 @@ async def export_all(current: dict = Depends(require_admin)):
         for k, v in list(doc.items()):
             if isinstance(v, datetime):
                 doc[k] = v.isoformat()
+        doc["role"] = role_of.get(doc.get("annotator"))
+        doc["is_overlap"] = (
+            doc["sentence_id"] in _OVERLAP_BY_WORD.get(doc["word"], set())
+            if _ASSIGNMENT_READY else None
+        )
         doc.update(sentences.get(doc["sentence_id"], {}))
-    return JSONResponse(content=labels)
+
+    assignment = None
+    a_doc = await assignments_collection.find_one({}, {"overlap": 1, "seed": 1, "annotators": 1, "created_at": 1})
+    if a_doc:
+        assignment = {
+            "overlap": a_doc.get("overlap"),
+            "seed": a_doc.get("seed"),
+            "annotators": a_doc.get("annotators"),
+            "created_at": a_doc["created_at"].isoformat() if a_doc.get("created_at") else None,
+        }
+
+    return JSONResponse(content={
+        "exported_at": datetime.utcnow().isoformat(),
+        "exported_by": current["name"],
+        "n_labels": len(labels),
+        "annotators": annotators,
+        "assignment": assignment,
+        "senses": senses,
+        "labels": labels,
+    })

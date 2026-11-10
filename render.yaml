@@ -11,3 +11,5 @@ services:
         value: wsd_annotator
       - key: SESSION_SECRET
         generateValue: true
+      - key: PYTHON_VERSION
+        value: 3.11.9
